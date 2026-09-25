@@ -26,6 +26,13 @@ jobs:
           unzip -q /tmp/sdks.zip -d /tmp
           cp -r /tmp/sdks-master/iPhoneOS14.5.sdk $THEOS/sdks/
 
+      - name: Fix line endings
+        run: |
+          brew install dos2unix
+          dos2unix control
+          dos2unix Makefile
+          dos2unix MLBBESP.plist
+
       - name: Build
         run: make package FINAL=YES
 
