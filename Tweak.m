@@ -1,6 +1,5 @@
 // MLBBESP — Internal ESP dylib for Mobile Legends (iOS)
-// Hardened build: vm_running gate, single-image class search,
-// crash-proof reads via vm_read_overwrite, ESP off by default.
+// Debug build: multi-assembly search + live debug HUD.
 
 #import <UIKit/UIKit.h>
 #import <CoreGraphics/CoreGraphics.h>
@@ -92,7 +91,7 @@ static bool init_il2cpp(void) {
     return true;
 }
 
-// ---- crash-proof memory reads (probe via mach, never segfault) ----
+// ---- crash-proof memory reads ----
 static bool safe_read(uintptr_t addr, void* buf, size_t len) {
     if (addr == 0 || len == 0) return false;
     vm_size_t out = 0;
@@ -122,11 +121,24 @@ static int g_entity_count = 0;
 static vec3 g_cam_pos = {0};
 static float g_screen_w = 0, g_screen_h = 0;
 
-// ---- ESP settings (ESP starts OFF — enable via panel) ----
+// ---- ESP settings ----
 static volatile bool g_esp_enabled = false;
 static volatile bool g_show_names = true;
 static volatile bool g_show_hp = true;
 static volatile bool g_show_dead = false;
+static volatile bool g_show_debug = true;
+
+// ---- live debug state ----
+static volatile int  g_st_il2cpp        = 0;
+static volatile int  g_st_bm            = 0;
+static volatile int  g_st_gm            = 0;
+static volatile int  g_st_inst          = 0;
+static volatile int  g_st_list          = -1;
+static volatile int  g_st_proj          = 0;
+static volatile int  g_st_cam           = 0;
+static volatile int  g_st_tries         = 0;
+static float         g_st_campx         = 0, g_st_campy = 0, g_st_campz = 0;
+static char          g_st_bm_img[64]    = "?";
 
 static int32_t read_i32(uintptr_t a) { int32_t v=0; safe_read(a,&v,4); return v; }
 static bool read_bool(uintptr_t a) { uint8_t v=0; safe_read(a,&v,1); return v!=0; }
@@ -162,8 +174,8 @@ static void read_string(uintptr_t str_ptr, char* out, int max_len) {
     out[j] = '\0';
 }
 
-// ---- class resolution (Assembly-CSharp.dll only) ----
-static Il2CppClass* find_class_in_assembly_csharp(const char* target, const char* required_field) {
+// ---- class resolution: search ALL assemblies (crash-proofed reads make this safe) ----
+static Il2CppClass* find_class_anywhere(const char* target, const char* required_field, char* found_img, int img_max) {
     if (!g_il2cpp_ready) return NULL;
     Il2CppDomain* domain = p_domain_get();
     if (domain == NULL) return NULL;
@@ -178,16 +190,20 @@ static Il2CppClass* find_class_in_assembly_csharp(const char* target, const char
 
         const char* img_name = p_image_get_name(image);
         if (img_name == NULL) continue;
-        if (strcmp(img_name, "Assembly-CSharp.dll") != 0) continue;
 
         size_t cc = p_image_get_class_count(image);
-        if (cc == 0 || cc > 100000) continue;
+        if (cc == 0 || cc > 200000) continue;
 
         for (size_t c = 0; c < cc; c++) {
             Il2CppClass* klass = p_image_get_class(image, c);
             if (klass == NULL) continue;
             const char* name = p_class_get_name(klass);
             if (name != NULL && strcmp(name, target) == 0) {
+                // first name-match wins even if field check fails — record where
+                if (found_img != NULL) {
+                    strncpy(found_img, img_name, img_max - 1);
+                    found_img[img_max - 1] = '\0';
+                }
                 if (p_class_get_field_from_name(klass, required_field) != NULL) return klass;
             }
         }
@@ -196,8 +212,15 @@ static Il2CppClass* find_class_in_assembly_csharp(const char* target, const char
 }
 
 static bool resolve_classes(void) {
-    if (g_bm_class == NULL) g_bm_class = find_class_in_assembly_csharp("BattleManager", "m_ShowPlayers");
-    if (g_gm_class == NULL) g_gm_class = find_class_in_assembly_csharp("GameMethod", "mainCamera");
+    bool ok = false;
+    if (g_bm_class == NULL) {
+        g_bm_class = find_class_anywhere("BattleManager", "m_ShowPlayers", g_st_bm_img, sizeof(g_st_bm_img));
+        if (g_bm_class != NULL) { g_st_bm = 1; ok = true; }
+    }
+    if (g_gm_class == NULL) {
+        g_gm_class = find_class_anywhere("GameMethod", "mainCamera", NULL, 0);
+        if (g_gm_class != NULL) g_st_gm = 1;
+    }
     return (g_bm_class != NULL);
 }
 
@@ -241,28 +264,38 @@ static bool project_to_screen(vec3 world, float* sx, float* sy) {
     return true;
 }
 
-// ---- entity reading (all reads crash-proof) ----
+// ---- entity reading ----
 static void read_all_entities(void) {
     pthread_mutex_lock(&g_lock);
     g_entity_count = 0;
     pthread_mutex_unlock(&g_lock);
 
+    g_st_proj = 0;
     if (!g_il2cpp_ready || g_bm_class == NULL) return;
     if (!g_esp_enabled) return;
 
     uintptr_t bm = get_bm_instance();
+    g_st_inst = (bm != 0) ? 1 : 0;
     if (bm == 0) return;
 
+    // camera
     uintptr_t sf = get_gm_mainCamera();
-    if (sf != 0) g_cam_pos = read_vec3(sf + SF_m_CameraCurrentPos);
+    if (sf != 0) {
+        g_cam_pos = read_vec3(sf + SF_m_CameraCurrentPos);
+        g_st_cam = 1;
+        g_st_campx = g_cam_pos.x; g_st_campy = g_cam_pos.y; g_st_campz = g_cam_pos.z;
+    } else {
+        g_st_cam = 0;
+    }
 
     uintptr_t list = read_ptr(bm + BM_m_ShowPlayers);
-    if (list == 0) return;
+    if (list == 0) { g_st_list = -1; return; }
     uintptr_t arr = read_ptr(list + O_LIST_ITEMS);
-    if (arr == 0) return;
+    if (arr == 0) { g_st_list = -2; return; }
 
     int32_t count = read_i32(arr + O_ARRAY_LENGTH);
     int32_t list_size = read_i32(list + O_LIST_SIZE);
+    g_st_list = list_size;
     if (list_size >= 0 && list_size < count) count = list_size;
     if (count <= 0) return;
     if (count > MAX_ENTITIES) count = MAX_ENTITIES;
@@ -272,6 +305,7 @@ static void read_all_entities(void) {
 
     ESPEntityData local[MAX_ENTITIES];
     int n = 0;
+    int projected = 0;
     for (int i = 0; i < count && n < MAX_ENTITIES; i++) {
         uintptr_t ep = ents[i];
         if (ep == 0) continue;
@@ -302,8 +336,10 @@ static void read_all_entities(void) {
         float fx, fy, hx, hy;
         vec3 feet = world;
         vec3 head = { world.x, world.y + HERO_HEIGHT, world.z };
-        if (!project_to_screen(feet, &fx, &fy)) continue;
-        if (!project_to_screen(head, &hx, &hy)) continue;
+        bool pf = project_to_screen(feet, &fx, &fy);
+        bool ph = project_to_screen(head, &hx, &hy);
+        if (!pf || !ph) continue;
+        projected++;
 
         float bh = fabsf(fy - hy);
         if (bh < 4.0f) bh = 4.0f;
@@ -312,8 +348,7 @@ static void read_all_entities(void) {
         e->sy = hy;
         e->bw = bw;
         e->bh = bh;
-        e->is_visible = (e->sx >= 0 && e->sx <= g_screen_w &&
-                         e->sy >= 0 && e->sy <= g_screen_h);
+        e->is_visible = true; // draw even if partially off-screen; HUD proves chain works
         n++;
     }
 
@@ -321,17 +356,18 @@ static void read_all_entities(void) {
     memcpy(g_entities, local, n * sizeof(ESPEntityData));
     g_entity_count = n;
     pthread_mutex_unlock(&g_lock);
+    g_st_proj = projected;
 }
 
 static void* reader_thread(void* arg) {
     (void)arg;
 
-    // wait until IL2CPP VM is actually running — never touch il2cpp before init
     int waits = 0;
     while (waits < 600) {
         if (g_il2cpp_ready) break;
         if (init_il2cpp() && p_vm_running()) {
             g_il2cpp_ready = true;
+            g_st_il2cpp = 1;
             break;
         }
         waits++;
@@ -348,8 +384,9 @@ static void* reader_thread(void* arg) {
     }
 
     int attempts = 0;
-    while (!resolve_classes() && attempts < 180) {
+    while (!resolve_classes() && attempts < 300) {
         attempts++;
+        g_st_tries = attempts;
         usleep(2000000);
     }
     if (g_bm_class == NULL) { NSLog(@"[MLBBESP] BattleManager not found"); return NULL; }
@@ -363,7 +400,7 @@ static void* reader_thread(void* arg) {
 }
 
 // ===========================================================================
-// ESP OVERLAY VIEW (draws boxes — non-interactive)
+// ESP OVERLAY VIEW
 // ===========================================================================
 
 @interface ESPOverlayView : UIView
@@ -390,10 +427,37 @@ static void* reader_thread(void* arg) {
     [self setNeedsDisplay];
 }
 
+- (void)drawDebugHUD:(CGContextRef)ctx {
+    char lines[10][96];
+    int n = 0;
+    snprintf(lines[n++], 96, "il2cpp: %s", g_st_il2cpp ? "OK" : "waiting...");
+    snprintf(lines[n++], 96, "tries: %d", g_st_tries);
+    snprintf(lines[n++], 96, "BattleManager: %s (%s)", g_st_bm ? "OK" : "NOT FOUND", g_st_bm_img);
+    snprintf(lines[n++], 96, "GameMethod: %s", g_st_gm ? "OK" : "NOT FOUND");
+    snprintf(lines[n++], 96, "Instance: %s", g_st_inst ? "OK" : "null (enter a match)");
+    snprintf(lines[n++], 96, "cam: %s (%.0f,%.0f,%.0f)", g_st_cam ? "OK" : "FAIL", g_st_campx, g_st_campy, g_st_campz);
+    snprintf(lines[n++], 96, "list count: %d", g_st_list);
+    snprintf(lines[n++], 96, "projected: %d", g_st_proj);
+    snprintf(lines[n++], 96, "esp: %s", g_esp_enabled ? "ON" : "OFF");
+
+    UIFont* font = [UIFont monospacedSystemFontOfSize:9 weight:UIFontWeightRegular];
+    CGContextSetFillColorWithColor(ctx, [UIColor colorWithWhite:0 alpha:0.55].CGColor);
+    CGContextFillRect(ctx, CGRectMake(4, 60, 230, 14 * n + 8));
+
+    for (int i = 0; i < n; i++) {
+        NSString* s = [NSString stringWithUTF8String:lines[i]];
+        NSDictionary* attrs = @{ NSFontAttributeName: font,
+                                 NSForegroundColorAttributeName: [UIColor greenColor] };
+        [s drawAtPoint:CGPointMake(8, 64 + i * 14) withAttributes:attrs];
+    }
+}
+
 - (void)drawRect:(CGRect)rect {
     (void)rect;
     CGContextRef ctx = UIGraphicsGetCurrentContext();
     if (ctx == NULL) return;
+
+    if (g_show_debug) [self drawDebugHUD:ctx];
     if (!g_esp_enabled) return;
 
     ESPEntityData ents[MAX_ENTITIES];
@@ -406,7 +470,7 @@ static void* reader_thread(void* arg) {
 
     for (int i = 0; i < count; i++) {
         ESPEntityData* e = &ents[i];
-        if (!e->is_visible || e->is_self) continue;
+        if (e->is_self) continue;
         if (e->is_dead && !g_show_dead) continue;
 
         UIColor* box_color;
@@ -521,8 +585,16 @@ static void* reader_thread(void* arg) {
         [s4 addTarget:self action:@selector(deadToggled:) forControlEvents:UIControlEventValueChanged];
         [self addSubview:s4];
 
+        UILabel* l5 = [[UILabel alloc] initWithFrame:CGRectMake(16, 218, 150, 20)];
+        l5.text = @"Debug HUD"; l5.textColor = [UIColor lightGrayColor]; l5.font = [UIFont systemFontOfSize:13];
+        [self addSubview:l5];
+        UISwitch* s5 = [[UISwitch alloc] initWithFrame:CGRectMake(w - 70, 214, 0, 0)];
+        s5.on = g_show_debug; s5.onTintColor = [UIColor colorWithRed:0.2 green:0.8 blue:0.4 alpha:1];
+        [s5 addTarget:self action:@selector(debugToggled:) forControlEvents:UIControlEventValueChanged];
+        [self addSubview:s5];
+
         UIButton* closeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-        closeBtn.frame = CGRectMake(16, 214, w - 32, 36);
+        closeBtn.frame = CGRectMake(16, 256, w - 32, 36);
         [closeBtn setTitle:@"Close" forState:UIControlStateNormal];
         [closeBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
         closeBtn.backgroundColor = [UIColor colorWithWhite:0.25 alpha:1];
@@ -537,6 +609,7 @@ static void* reader_thread(void* arg) {
 - (void)namesToggled:(UISwitch*)s { g_show_names = s.on; }
 - (void)hpToggled:(UISwitch*)s    { g_show_hp = s.on; }
 - (void)deadToggled:(UISwitch*)s  { g_show_dead = s.on; }
+- (void)debugToggled:(UISwitch*)s { g_show_debug = s.on; }
 
 - (void)closeTapped {
     [[NSNotificationCenter defaultCenter] postNotificationName:@"MLBBESP_ClosePanel" object:nil];
@@ -545,7 +618,7 @@ static void* reader_thread(void* arg) {
 @end
 
 // ===========================================================================
-// FLOATING BUTTON (draggable — window moves with it)
+// FLOATING BUTTON
 // ===========================================================================
 
 @interface FloatingButton : UIButton
@@ -614,7 +687,7 @@ static void* reader_thread(void* arg) {
 @end
 
 // ===========================================================================
-// MENU CONTROLLER — two small windows, never covers the game
+// MENU CONTROLLER
 // ===========================================================================
 
 @interface ESPMenuController ()
@@ -656,7 +729,7 @@ static void* reader_thread(void* arg) {
         [self.btnWindow addSubview:self.floatingBtn];
         self.btnWindow.hidden = NO;
 
-        CGFloat panelW = 260, panelH = 264;
+        CGFloat panelW = 260, panelH = 306;
         CGRect panelFrame = CGRectMake((screen.size.width - panelW) / 2.0,
                                        (screen.size.height - panelH) / 2.0,
                                        panelW, panelH);
@@ -707,7 +780,7 @@ static void* reader_thread(void* arg) {
 @end
 
 // ===========================================================================
-// ESP OVERLAY WINDOW (full-screen but NON-INTERACTIVE)
+// ESP OVERLAY WINDOW
 // ===========================================================================
 
 static UIWindow* g_overlay_window = nil;
