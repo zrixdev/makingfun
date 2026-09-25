@@ -13,15 +13,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Theos
+      - name: Install Theos + ldid + SDK
         run: |
+          brew install ldid
           export THEOS=$HOME/theos
           git clone --recursive https://github.com/theos/theos.git $THEOS
           echo "THEOS=$HOME/theos" >> $GITHUB_ENV
           echo "$THEOS/bin" >> $GITHUB_PATH
 
-      - name: Install iOS SDK
-        run: |
           mkdir -p $THEOS/sdks
           curl -L https://github.com/theos/sdks/archive/refs/heads/master.zip -o /tmp/sdks.zip
           unzip -q /tmp/sdks.zip -d /tmp
@@ -40,4 +39,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: mlbb-esp-dylib
-          path: .theos/*/obj/MLBBESP.dylib
+          path: .theos/*/obj/debug/MLBBESP.dylib
