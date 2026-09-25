@@ -1,12 +1,12 @@
 // MLBBESP — Internal ESP dylib for Mobile Legends (iOS)
 // Hardened build: vm_running gate, single-image class search,
-// crash-proof reads via mach_vm_read_overwrite, ESP off by default.
+// crash-proof reads via vm_read_overwrite, ESP off by default.
 
 #import <UIKit/UIKit.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <Foundation/Foundation.h>
 #import <mach/mach.h>
-#import <mach/mach_vm.h>
+#import <mach/vm_map.h>
 #import <dlfcn.h>
 #import <pthread.h>
 #import <unistd.h>
@@ -95,12 +95,12 @@ static bool init_il2cpp(void) {
 // ---- crash-proof memory reads (probe via mach, never segfault) ----
 static bool safe_read(uintptr_t addr, void* buf, size_t len) {
     if (addr == 0 || len == 0) return false;
-    mach_vm_size_t out = 0;
-    kern_return_t kr = mach_vm_read_overwrite(mach_task_self(),
-                                              (mach_vm_address_t)addr,
-                                              (mach_vm_size_t)len,
-                                              (mach_vm_address_t)buf,
-                                              &out);
+    vm_size_t out = 0;
+    kern_return_t kr = vm_read_overwrite(mach_task_self(),
+                                         (vm_address_t)addr,
+                                         (vm_size_t)len,
+                                         (vm_address_t)buf,
+                                         &out);
     return (kr == KERN_SUCCESS && out == len);
 }
 
