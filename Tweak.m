@@ -174,7 +174,7 @@ static void read_string(uintptr_t str_ptr, char* out, int max_len) {
     out[j] = '\0';
 }
 
-// ---- class resolution: search ALL assemblies (crash-proofed reads make this safe) ----
+// ---- class resolution: search ALL assemblies ----
 static Il2CppClass* find_class_anywhere(const char* target, const char* required_field, char* found_img, int img_max) {
     if (!g_il2cpp_ready) return NULL;
     Il2CppDomain* domain = p_domain_get();
@@ -199,7 +199,6 @@ static Il2CppClass* find_class_anywhere(const char* target, const char* required
             if (klass == NULL) continue;
             const char* name = p_class_get_name(klass);
             if (name != NULL && strcmp(name, target) == 0) {
-                // first name-match wins even if field check fails — record where
                 if (found_img != NULL) {
                     strncpy(found_img, img_name, img_max - 1);
                     found_img[img_max - 1] = '\0';
@@ -212,10 +211,9 @@ static Il2CppClass* find_class_anywhere(const char* target, const char* required
 }
 
 static bool resolve_classes(void) {
-    bool ok = false;
     if (g_bm_class == NULL) {
         g_bm_class = find_class_anywhere("BattleManager", "m_ShowPlayers", g_st_bm_img, sizeof(g_st_bm_img));
-        if (g_bm_class != NULL) { g_st_bm = 1; ok = true; }
+        if (g_bm_class != NULL) g_st_bm = 1;
     }
     if (g_gm_class == NULL) {
         g_gm_class = find_class_anywhere("GameMethod", "mainCamera", NULL, 0);
@@ -278,7 +276,6 @@ static void read_all_entities(void) {
     g_st_inst = (bm != 0) ? 1 : 0;
     if (bm == 0) return;
 
-    // camera
     uintptr_t sf = get_gm_mainCamera();
     if (sf != 0) {
         g_cam_pos = read_vec3(sf + SF_m_CameraCurrentPos);
@@ -348,7 +345,7 @@ static void read_all_entities(void) {
         e->sy = hy;
         e->bw = bw;
         e->bh = bh;
-        e->is_visible = true; // draw even if partially off-screen; HUD proves chain works
+        e->is_visible = true;
         n++;
     }
 
@@ -434,7 +431,7 @@ static void* reader_thread(void* arg) {
     snprintf(lines[n++], 96, "tries: %d", g_st_tries);
     snprintf(lines[n++], 96, "BattleManager: %s (%s)", g_st_bm ? "OK" : "NOT FOUND", g_st_bm_img);
     snprintf(lines[n++], 96, "GameMethod: %s", g_st_gm ? "OK" : "NOT FOUND");
-    snprintf(lines[n++], 96, "Instance: %s", g_st_inst ? "OK" : "null (enter a match)");
+    snprintf(lines[n++], 96, "Instance: %s", g_st_inst ? "OK" : "null");
     snprintf(lines[n++], 96, "cam: %s (%.0f,%.0f,%.0f)", g_st_cam ? "OK" : "FAIL", g_st_campx, g_st_campy, g_st_campz);
     snprintf(lines[n++], 96, "list count: %d", g_st_list);
     snprintf(lines[n++], 96, "projected: %d", g_st_proj);
