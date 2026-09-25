@@ -1,3 +1,6 @@
+// MLBBESP — Internal ESP dylib for Mobile Legends (iOS)
+// Injected via Substrate/ElleKit/TrollFools into com.mobile.legends
+
 #import <UIKit/UIKit.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <Foundation/Foundation.h>
@@ -33,6 +36,14 @@
 #define HERO_HEIGHT     2.2f
 #define MAX_ENTITIES    16
 
+// ---- forward declarations ----
+@class ESPMenuController;
+@interface ESPMenuController : NSObject
++ (instancetype)shared;
+- (void)togglePanel;
+- (void)setupWithKeyWindow:(UIWindow*)keyWindow;
+@end
+
 // ---- IL2CPP API ----
 typedef void* Il2CppDomain;
 typedef void* Il2CppAssembly;
@@ -54,14 +65,14 @@ static Il2CppClass* g_bm_class = NULL;
 static Il2CppClass* g_gm_class = NULL;
 
 static bool init_il2cpp(void) {
-    p_domain_get              = dlsym(RTLD_DEFAULT, "il2cpp_domain_get");
-    p_domain_get_assemblies   = dlsym(RTLD_DEFAULT, "il2cpp_domain_get_assemblies");
-    p_assembly_get_image      = dlsym(RTLD_DEFAULT, "il2cpp_assembly_get_image");
-    p_image_get_class_count   = dlsym(RTLD_DEFAULT, "il2cpp_image_get_class_count");
-    p_image_get_class         = dlsym(RTLD_DEFAULT, "il2cpp_image_get_class");
-    p_class_get_name          = dlsym(RTLD_DEFAULT, "il2cpp_class_get_name");
+    p_domain_get                = dlsym(RTLD_DEFAULT, "il2cpp_domain_get");
+    p_domain_get_assemblies     = dlsym(RTLD_DEFAULT, "il2cpp_domain_get_assemblies");
+    p_assembly_get_image        = dlsym(RTLD_DEFAULT, "il2cpp_assembly_get_image");
+    p_image_get_class_count     = dlsym(RTLD_DEFAULT, "il2cpp_image_get_class_count");
+    p_image_get_class           = dlsym(RTLD_DEFAULT, "il2cpp_image_get_class");
+    p_class_get_name            = dlsym(RTLD_DEFAULT, "il2cpp_class_get_name");
     p_class_get_field_from_name = dlsym(RTLD_DEFAULT, "il2cpp_class_get_field_from_name");
-    p_field_static_get_value  = dlsym(RTLD_DEFAULT, "il2cpp_field_static_get_value");
+    p_field_static_get_value    = dlsym(RTLD_DEFAULT, "il2cpp_field_static_get_value");
     if (!p_domain_get || !p_domain_get_assemblies || !p_assembly_get_image ||
         !p_image_get_class_count || !p_image_get_class || !p_class_get_name ||
         !p_class_get_field_from_name || !p_field_static_get_value) return false;
@@ -200,7 +211,7 @@ static void read_all_entities(void) {
     pthread_mutex_unlock(&g_lock);
 
     if (!g_il2cpp_ready || !g_bm_class) return;
-    if (!g_esp_enabled) return; // skip reading entirely when ESP off
+    if (!g_esp_enabled) return;
 
     uintptr_t bm = get_bm_instance();
     if (!bm) return;
@@ -407,68 +418,64 @@ static void* reader_thread(void* arg) {
         self.layer.borderColor = [UIColor colorWithWhite:0.3 alpha:1].CGColor;
         self.clipsToBounds = YES;
 
-        // Title
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 12, 200, 24)];
         self.titleLabel.text = @"MLBB ESP";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.font = [UIFont boldSystemFontOfSize:16];
         [self addSubview:self.titleLabel];
 
-        // ESP toggle
+        float w = frame.size.width;
+
         UILabel* espLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 50, 150, 20)];
         espLabel.text = @"ESP Enabled";
         espLabel.textColor = [UIColor lightGrayColor];
         espLabel.font = [UIFont systemFontOfSize:13];
         [self addSubview:espLabel];
 
-        self.espSwitch = [[UISwitch alloc] initWithFrame:CGRectMake(self.frame.size.width - 70, 46, 0, 0)];
+        self.espSwitch = [[UISwitch alloc] initWithFrame:CGRectMake(w - 70, 46, 0, 0)];
         self.espSwitch.on = g_esp_enabled;
         self.espSwitch.onTintColor = [UIColor colorWithRed:0.2 green:0.8 blue:0.4 alpha:1];
         [self.espSwitch addTarget:self action:@selector(espToggled:) forControlEvents:UIControlEventValueChanged];
         [self addSubview:self.espSwitch];
 
-        // Names toggle
         UILabel* namesLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 92, 150, 20)];
         namesLabel.text = @"Show Names";
         namesLabel.textColor = [UIColor lightGrayColor];
         namesLabel.font = [UIFont systemFontOfSize:13];
         [self addSubview:namesLabel];
 
-        self.namesSwitch = [[UISwitch alloc] initWithFrame:CGRectMake(self.frame.size.width - 70, 88, 0, 0)];
+        self.namesSwitch = [[UISwitch alloc] initWithFrame:CGRectMake(w - 70, 88, 0, 0)];
         self.namesSwitch.on = g_show_names;
         self.namesSwitch.onTintColor = [UIColor colorWithRed:0.2 green:0.8 blue:0.4 alpha:1];
         [self.namesSwitch addTarget:self action:@selector(namesToggled:) forControlEvents:UIControlEventValueChanged];
         [self addSubview:self.namesSwitch];
 
-        // HP toggle
         UILabel* hpLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 134, 150, 20)];
         hpLabel.text = @"Show HP Bar";
         hpLabel.textColor = [UIColor lightGrayColor];
         hpLabel.font = [UIFont systemFontOfSize:13];
         [self addSubview:hpLabel];
 
-        self.hpSwitch = [[UISwitch alloc] initWithFrame:CGRectMake(self.frame.size.width - 70, 130, 0, 0)];
+        self.hpSwitch = [[UISwitch alloc] initWithFrame:CGRectMake(w - 70, 130, 0, 0)];
         self.hpSwitch.on = g_show_hp;
         self.hpSwitch.onTintColor = [UIColor colorWithRed:0.2 green:0.8 blue:0.4 alpha:1];
         [self.hpSwitch addTarget:self action:@selector(hpToggled:) forControlEvents:UIControlEventValueChanged];
         [self addSubview:self.hpSwitch];
 
-        // Dead toggle
         UILabel* deadLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 176, 150, 20)];
         deadLabel.text = @"Show Dead";
         deadLabel.textColor = [UIColor lightGrayColor];
         deadLabel.font = [UIFont systemFontOfSize:13];
         [self addSubview:deadLabel];
 
-        self.deadSwitch = [[UISwitch alloc] initWithFrame:CGRectMake(self.frame.size.width - 70, 172, 0, 0)];
+        self.deadSwitch = [[UISwitch alloc] initWithFrame:CGRectMake(w - 70, 172, 0, 0)];
         self.deadSwitch.on = g_show_dead;
         self.deadSwitch.onTintColor = [UIColor colorWithRed:0.2 green:0.8 blue:0.4 alpha:1];
         [self.deadSwitch addTarget:self action:@selector(deadToggled:) forControlEvents:UIControlEventValueChanged];
         [self addSubview:self.deadSwitch];
 
-        // Close button
         UIButton* closeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-        closeBtn.frame = CGRectMake(16, 214, self.frame.size.width - 32, 36);
+        closeBtn.frame = CGRectMake(16, 214, w - 32, 36);
         [closeBtn setTitle:@"Close" forState:UIControlStateNormal];
         [closeBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
         closeBtn.backgroundColor = [UIColor colorWithWhite:0.25 alpha:1];
@@ -538,14 +545,12 @@ static void* reader_thread(void* arg) {
         if (fabs(translation.x) > 4 || fabs(translation.y) > 4) self.moved = true;
         CGPoint newCenter = CGPointMake(self.originalCenter.x + translation.x,
                                         self.originalCenter.y + translation.y);
-        // Clamp to screen
         CGFloat half = self.frame.size.width / 2.0;
         newCenter.x = MAX(half, MIN(self.superview.frame.size.width - half, newCenter.x));
         newCenter.y = MAX(half, MIN(self.superview.frame.size.height - half, newCenter.y));
         self.center = newCenter;
     }
     if (gr.state == UIGestureRecognizerStateEnded) {
-        // Snap to nearest edge
         CGFloat half = self.frame.size.width / 2.0;
         CGFloat centerX = self.center.x;
         CGFloat targetX;
@@ -561,8 +566,8 @@ static void* reader_thread(void* arg) {
 }
 
 - (void)tapped {
-    if (self.moved) return; // was a drag, not a tap
-    [ESPMenuController.shared togglePanel];
+    if (self.moved) return;
+    [[ESPMenuController shared] togglePanel];
 }
 
 @end
@@ -571,11 +576,7 @@ static void* reader_thread(void* arg) {
 // MENU CONTROLLER
 // ===========================================================================
 
-@interface ESPMenuController : NSObject
-+ (instancetype)shared;
-- (void)togglePanel;
-- (void)showPanel;
-- (void)hidePanel;
+@interface ESPMenuController ()
 @property (strong, nonatomic) UIWindow* controlWindow;
 @property (strong, nonatomic) FloatingButton* floatingBtn;
 @property (strong, nonatomic) SettingsPanel* panel;
@@ -598,7 +599,6 @@ static void* reader_thread(void* arg) {
 
     CGRect b = UIScreen.mainScreen.bounds;
 
-    // Control window (interactive)
     self.controlWindow = [[UIWindow alloc] initWithFrame:b];
     if (@available(iOS 13.0, *)) self.controlWindow.windowScene = keyWindow.windowScene;
     self.controlWindow.windowLevel = UIWindowLevelAlert + 1000;
@@ -606,12 +606,10 @@ static void* reader_thread(void* arg) {
     self.controlWindow.userInteractionEnabled = YES;
     self.controlWindow.hidden = NO;
 
-    // Floating button
     CGFloat btnSize = 52;
     self.floatingBtn = [[FloatingButton alloc] initWithFrame:CGRectMake(b.size.width - btnSize - 12, b.size.height * 0.25, btnSize, btnSize)];
     [self.controlWindow addSubview:self.floatingBtn];
 
-    // Settings panel (hidden initially)
     CGFloat panelW = 260;
     CGFloat panelH = 264;
     CGFloat panelX = (b.size.width - panelW) / 2.0;
@@ -683,6 +681,8 @@ static void create_overlay(UIWindow* key) {
     NSLog(@"[MLBBESP] Overlay ready (%.0f x %.0f)", g_screen_w, g_screen_h);
 }
 
+static void poll_windows(void);
+
 static void poll_windows(void) {
     static int polls = 0;
     if (g_overlay_window) return;
@@ -702,7 +702,7 @@ static void poll_windows(void) {
 
         create_overlay(key);
         [[ESPMenuController shared] setupWithKeyWindow:key];
-        [key makeKeyWindow]; // give focus back to game
+        [key makeKeyWindow];
     });
 }
 
@@ -714,12 +714,7 @@ __attribute__((constructor))
 static void MLBBESP_init(void) {
     NSLog(@"[MLBBESP] Loaded");
     pthread_t t;
-    pthread_create(&t, NULL, reader_thread_ref(), NULL);
+    pthread_create(&t, NULL, reader_thread, NULL);
     pthread_detach(t);
     dispatch_async(dispatch_get_main_queue(), ^{ poll_windows(); });
-}
-
-// forward declaration fix
-static void* reader_thread_ref(void) {
-    return (void*)reader_thread;
 }
