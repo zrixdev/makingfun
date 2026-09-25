@@ -1,8 +1,11 @@
 // MLBBESP — Internal ESP dylib for Mobile Legends (iOS)
+// Hardened build: vm_running gate, single-image class search,
+// crash-proof reads via mach_vm_read_overwrite, ESP off by default.
 
 #import <UIKit/UIKit.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <Foundation/Foundation.h>
+#import <mach/mach.h>
 #import <dlfcn.h>
 #import <pthread.h>
 #import <string.h>
@@ -10,6 +13,7 @@
 
 // ---- offsets (IL2CPP v29, MLBB 2.2.16) ----
 #define O_LIST_ITEMS            0x10
+#define O_LIST_SIZE             0x18
 #define O_ARRAY_LENGTH          0x18
 #define O_ARRAY_DATA            0x20
 #define O_STRING_LENGTH         0x10
@@ -50,35 +54,52 @@ typedef void* Il2CppImage;
 typedef void* Il2CppClass;
 typedef void* Il2CppFieldInfo;
 
-static Il2CppDomain* (*p_domain_get)(void);
+static bool              (*p_vm_running)(void);
+static Il2CppDomain*     (*p_domain_get)(void);
 static const Il2CppAssembly** (*p_domain_get_assemblies)(const Il2CppDomain*, size_t*);
-static Il2CppImage* (*p_assembly_get_image)(const Il2CppAssembly*);
-static size_t (*p_image_get_class_count)(const Il2CppImage*);
-static Il2CppClass* (*p_image_get_class)(const Il2CppImage*, size_t);
-static const char* (*p_class_get_name)(const Il2CppClass*);
-static Il2CppFieldInfo* (*p_class_get_field_from_name)(const Il2CppClass*, const char*);
-static void (*p_field_static_get_value)(Il2CppFieldInfo*, void*);
-static void* (*p_thread_attach)(Il2CppDomain*);
+static Il2CppImage*      (*p_assembly_get_image)(const Il2CppAssembly*);
+static const char*       (*p_image_get_name)(const Il2CppImage*);
+static size_t            (*p_image_get_class_count)(const Il2CppImage*);
+static Il2CppClass*      (*p_image_get_class)(const Il2CppImage*, size_t);
+static const char*       (*p_class_get_name)(const Il2CppClass*);
+static Il2CppFieldInfo*  (*p_class_get_field_from_name)(const Il2CppClass*, const char*);
+static void              (*p_field_static_get_value)(Il2CppFieldInfo*, void*);
+static void*             (*p_thread_attach)(Il2CppDomain*);
 
 static bool g_il2cpp_ready = false;
 static Il2CppClass* g_bm_class = NULL;
 static Il2CppClass* g_gm_class = NULL;
 
 static bool init_il2cpp(void) {
+    p_vm_running                = dlsym(RTLD_DEFAULT, "il2cpp_is_vm_running");
     p_domain_get                = dlsym(RTLD_DEFAULT, "il2cpp_domain_get");
     p_domain_get_assemblies     = dlsym(RTLD_DEFAULT, "il2cpp_domain_get_assemblies");
     p_assembly_get_image        = dlsym(RTLD_DEFAULT, "il2cpp_assembly_get_image");
+    p_image_get_name            = dlsym(RTLD_DEFAULT, "il2cpp_image_get_name");
     p_image_get_class_count     = dlsym(RTLD_DEFAULT, "il2cpp_image_get_class_count");
     p_image_get_class           = dlsym(RTLD_DEFAULT, "il2cpp_image_get_class");
     p_class_get_name            = dlsym(RTLD_DEFAULT, "il2cpp_class_get_name");
     p_class_get_field_from_name = dlsym(RTLD_DEFAULT, "il2cpp_class_get_field_from_name");
     p_field_static_get_value    = dlsym(RTLD_DEFAULT, "il2cpp_field_static_get_value");
     p_thread_attach             = dlsym(RTLD_DEFAULT, "il2cpp_thread_attach");
-    if (!p_domain_get || !p_domain_get_assemblies || !p_assembly_get_image ||
+    if (!p_vm_running || !p_domain_get || !p_domain_get_assemblies ||
+        !p_assembly_get_image || !p_image_get_name ||
         !p_image_get_class_count || !p_image_get_class || !p_class_get_name ||
         !p_class_get_field_from_name || !p_field_static_get_value ||
         !p_thread_attach) return false;
     return true;
+}
+
+// ---- crash-proof memory reads (probe via mach, never segfault) ----
+static bool safe_read(uintptr_t addr, void* buf, size_t len) {
+    if (!addr || len == 0) return false;
+    mach_vm_size_t out = 0;
+    kern_return_t kr = mach_vm_read_overwrite(mach_task_self(),
+                                              (mach_vm_address_t)addr,
+                                              (mach_vm_size_t)len,
+                                              (mach_vm_address_t)buf,
+                                              &out);
+    return (kr == KERN_SUCCESS && out == len);
 }
 
 // ---- helpers ----
@@ -99,30 +120,31 @@ static int g_entity_count = 0;
 static vec3 g_cam_pos = {0};
 static float g_screen_w = 0, g_screen_h = 0;
 
-// ---- ESP settings (controlled by GUI) ----
-static volatile bool g_esp_enabled = true;
+// ---- ESP settings (ESP starts OFF — enable via panel) ----
+static volatile bool g_esp_enabled = false;
 static volatile bool g_show_names = true;
 static volatile bool g_show_hp = true;
 static volatile bool g_show_dead = false;
 
-static int32_t read_i32(uintptr_t a) { int32_t v=0; if(a) memcpy(&v,(void*)a,4); return v; }
-static bool read_bool(uintptr_t a) { uint8_t v=0; if(a) memcpy(&v,(void*)a,1); return v!=0; }
-static uintptr_t read_ptr(uintptr_t a) { uintptr_t v=0; if(a) memcpy(&v,(void*)a,sizeof(v)); return v; }
+static int32_t read_i32(uintptr_t a) { int32_t v=0; safe_read(a,&v,4); return v; }
+static bool read_bool(uintptr_t a) { uint8_t v=0; safe_read(a,&v,1); return v!=0; }
+static uintptr_t read_ptr(uintptr_t a) { uintptr_t v=0; safe_read(a,&v,sizeof(v)); return v; }
 
 static vec3 read_vec3(uintptr_t a) {
     vec3 v = {0};
-    if (a) memcpy(&v, (void*)a, sizeof(v));
+    safe_read(a, &v, sizeof(v));
     return v;
 }
 
 static void read_string(uintptr_t str_ptr, char* out, int max_len) {
     out[0] = '\0';
     if (!str_ptr) return;
-    int32_t len = read_i32(str_ptr + O_STRING_LENGTH);
+    int32_t len = 0;
+    if (!safe_read(str_ptr + O_STRING_LENGTH, &len, 4)) return;
     if (len <= 0 || len > 256) return;
     int rl = (len < max_len - 1) ? len : (max_len - 1);
     uint16_t chars[256];
-    memcpy(chars, (void*)(str_ptr + O_STRING_CHARS), rl * sizeof(uint16_t));
+    if (!safe_read(str_ptr + O_STRING_CHARS, chars, rl * sizeof(uint16_t))) return;
     int j = 0;
     for (int i = 0; i < rl && j < max_len - 1; i++) {
         if (chars[i] < 0x80) out[j++] = (char)chars[i];
@@ -138,18 +160,28 @@ static void read_string(uintptr_t str_ptr, char* out, int max_len) {
     out[j] = '\0';
 }
 
-// ---- class resolution ----
-static Il2CppClass* find_class_by_name_verified(const char* target, const char* required_field) {
+// ---- class resolution (Assembly-CSharp.dll only) ----
+static Il2CppClass* find_class_in_assembly_csharp(const char* target, const char* required_field) {
     if (!g_il2cpp_ready) return NULL;
     Il2CppDomain* domain = p_domain_get();
     if (!domain) return NULL;
+
     size_t asm_count = 0;
     const Il2CppAssembly** assemblies = p_domain_get_assemblies(domain, &asm_count);
     if (!assemblies) return NULL;
+
     for (size_t a = 0; a < asm_count; a++) {
         Il2CppImage* image = p_assembly_get_image(assemblies[a]);
         if (!image) continue;
+
+        const char* img_name = p_image_get_name(image);
+        if (!img_name) continue;
+        // target image only — avoids touching 73 other assemblies' metadata
+        if (strcmp(img_name, "Assembly-CSharp.dll") != 0) continue;
+
         size_t cc = p_image_get_class_count(image);
+        if (cc == 0 || cc > 100000) continue;
+
         for (size_t c = 0; c < cc; c++) {
             Il2CppClass* klass = p_image_get_class(image, c);
             if (!klass) continue;
@@ -163,8 +195,8 @@ static Il2CppClass* find_class_by_name_verified(const char* target, const char* 
 }
 
 static bool resolve_classes(void) {
-    if (!g_bm_class) g_bm_class = find_class_by_name_verified("BattleManager", "m_ShowPlayers");
-    if (!g_gm_class) g_gm_class = find_class_by_name_verified("GameMethod", "mainCamera");
+    if (!g_bm_class) g_bm_class = find_class_in_assembly_csharp("BattleManager", "m_ShowPlayers");
+    if (!g_gm_class) g_gm_class = find_class_in_assembly_csharp("GameMethod", "mainCamera");
     return (g_bm_class != NULL);
 }
 
@@ -208,7 +240,7 @@ static bool project_to_screen(vec3 world, float* sx, float* sy) {
     return true;
 }
 
-// ---- entity reading ----
+// ---- entity reading (all reads crash-proof) ----
 static void read_all_entities(void) {
     pthread_mutex_lock(&g_lock);
     g_entity_count = 0;
@@ -227,18 +259,26 @@ static void read_all_entities(void) {
     if (!list) return;
     uintptr_t arr = read_ptr(list + O_LIST_ITEMS);
     if (!arr) return;
+
     int32_t count = read_i32(arr + O_ARRAY_LENGTH);
+    int32_t list_size = read_i32(list + O_LIST_SIZE);
+    if (list_size >= 0 && list_size < count) count = list_size; // sanity
     if (count <= 0) return;
     if (count > MAX_ENTITIES) count = MAX_ENTITIES;
 
     uintptr_t ents[MAX_ENTITIES];
-    memcpy(ents, (void*)(arr + O_ARRAY_DATA), count * sizeof(uintptr_t));
+    if (!safe_read(arr + O_ARRAY_DATA, ents, count * sizeof(uintptr_t))) return;
 
     ESPEntityData local[MAX_ENTITIES];
     int n = 0;
     for (int i = 0; i < count && n < MAX_ENTITIES; i++) {
         uintptr_t ep = ents[i];
         if (!ep) continue;
+
+        // probe object header first — rejects wild pointers safely
+        uint8_t probe = 0;
+        if (!safe_read(ep, &probe, 1)) continue;
+
         ESPEntityData* e = &local[n];
         memset(e, 0, sizeof(ESPEntityData));
 
@@ -285,19 +325,29 @@ static void read_all_entities(void) {
 
 static void* reader_thread(void* arg) {
     (void)arg;
-    int attempts = 0;
-    while (!g_il2cpp_ready && attempts < 120) {
-        if (init_il2cpp()) { g_il2cpp_ready = true; break; }
-        attempts++;
+
+    // wait for the IL2CPP VM to actually be running — never touch il2cpp before init
+    int waits = 0;
+    while (waits < 600 && g_esp_enabled == g_esp_enabled) { // loop cap ~10 min
+        if (g_il2cpp_ready) break;
+        if (init_il2cpp() && p_vm_running && p_vm_running()) {
+            g_il2cpp_ready = true;
+            break;
+        }
+        waits++;
         usleep(1000000);
     }
     if (!g_il2cpp_ready) return NULL;
-    NSLog(@"[MLBBESP] IL2CPP API ready");
+    NSLog(@"[MLBBESP] IL2CPP VM running, API ready");
 
     Il2CppDomain* domain = p_domain_get();
-    if (domain) p_thread_attach(domain);
+    if (!domain) return NULL;
+    if (!p_thread_attach(domain)) {
+        NSLog(@"[MLBBESP] thread attach failed");
+        return NULL;
+    }
 
-    attempts = 0;
+    int attempts = 0;
     while (!resolve_classes() && attempts < 180) {
         attempts++;
         usleep(2000000);
@@ -435,22 +485,6 @@ static void* reader_thread(void* arg) {
 
         float w = frame.size.width;
 
-        void (^addRow)(NSString*, CGFloat, BOOL*, SEL) = ^(NSString* label, CGFloat y, BOOL* value, SEL action) {
-            UILabel* l = [[UILabel alloc] initWithFrame:CGRectMake(16, y, 150, 20)];
-            l.text = label;
-            l.textColor = [UIColor lightGrayColor];
-            l.font = [UIFont systemFontOfSize:13];
-            [self addSubview:l];
-
-            UISwitch* s = [[UISwitch alloc] initWithFrame:CGRectMake(w - 70, y - 4, 0, 0)];
-            s.on = *value;
-            s.onTintColor = [UIColor colorWithRed:0.2 green:0.8 blue:0.4 alpha:1];
-            [s addTarget:self action:action forControlEvents:UIControlEventValueChanged];
-            s.tag = y;
-            [self addSubview:s];
-        };
-
-        // rows (switches stored via tags for state restore)
         UILabel* l1 = [[UILabel alloc] initWithFrame:CGRectMake(16, 50, 150, 20)];
         l1.text = @"ESP Enabled"; l1.textColor = [UIColor lightGrayColor]; l1.font = [UIFont systemFontOfSize:13];
         [self addSubview:l1];
@@ -554,7 +588,6 @@ static void* reader_thread(void* arg) {
         self.window.center = newCenter;
     }
     if (gr.state == UIGestureRecognizerStateEnded) {
-        // snap to nearest horizontal edge
         CGRect screen = UIScreen.mainScreen.bounds;
         CGFloat half = self.window.frame.size.width / 2.0;
         CGFloat targetX;
@@ -581,8 +614,8 @@ static void* reader_thread(void* arg) {
 // ===========================================================================
 
 @interface ESPMenuController ()
-@property (strong, nonatomic) UIWindow* btnWindow;      // exactly button-sized
-@property (strong, nonatomic) UIWindow* panelWindow;    // exactly panel-sized, hidden when closed
+@property (strong, nonatomic) UIWindow* btnWindow;
+@property (strong, nonatomic) UIWindow* panelWindow;
 @property (strong, nonatomic) FloatingButton* floatingBtn;
 @property (strong, nonatomic) SettingsPanel* panel;
 @property (assign, nonatomic) bool panelVisible;
@@ -602,46 +635,50 @@ static void* reader_thread(void* arg) {
 - (void)setupWithKeyWindow:(UIWindow*)keyWindow {
     if (self.btnWindow) return;
 
-    CGRect screen = UIScreen.mainScreen.bounds;
-    UIWindowScene* scene = nil;
-    if (@available(iOS 13.0, *)) scene = keyWindow.windowScene;
+    @try {
+        CGRect screen = UIScreen.mainScreen.bounds;
+        UIWindowScene* scene = nil;
+        if (@available(iOS 13.0, *)) scene = keyWindow.windowScene;
 
-    // ---- button window: 52x52, top-right area ----
-    CGFloat btnSize = 52;
-    CGRect btnFrame = CGRectMake(screen.size.width - btnSize - 12,
-                                 screen.size.height * 0.25, btnSize, btnSize);
-    self.btnWindow = [[UIWindow alloc] initWithFrame:btnFrame];
-    if (scene) self.btnWindow.windowScene = scene;
-    self.btnWindow.windowLevel = UIWindowLevelAlert + 1000;
-    self.btnWindow.backgroundColor = [UIColor clearColor];
-    self.btnWindow.userInteractionEnabled = YES;
-    self.floatingBtn = [[FloatingButton alloc] initWithFrame:self.btnWindow.bounds];
-    [self.btnWindow addSubview:self.floatingBtn];
-    self.btnWindow.hidden = NO;   // NOT makeKeyAndVisible — never steals focus
+        CGFloat btnSize = 52;
+        CGRect btnFrame = CGRectMake(screen.size.width - btnSize - 12,
+                                     screen.size.height * 0.25, btnSize, btnSize);
+        self.btnWindow = [[UIWindow alloc] initWithFrame:btnFrame];
+        if (scene) self.btnWindow.windowScene = scene;
+        self.btnWindow.windowLevel = UIWindowLevelAlert + 1000;
+        self.btnWindow.backgroundColor = [UIColor clearColor];
+        self.btnWindow.userInteractionEnabled = YES;
+        self.floatingBtn = [[FloatingButton alloc] initWithFrame:self.btnWindow.bounds];
+        [self.btnWindow addSubview:self.floatingBtn];
+        self.btnWindow.hidden = NO;
 
-    // ---- panel window: 260x264, centered, hidden ----
-    CGFloat panelW = 260, panelH = 264;
-    CGRect panelFrame = CGRectMake((screen.size.width - panelW) / 2.0,
-                                   (screen.size.height - panelH) / 2.0,
-                                   panelW, panelH);
-    self.panelWindow = [[UIWindow alloc] initWithFrame:panelFrame];
-    if (scene) self.panelWindow.windowScene = scene;
-    self.panelWindow.windowLevel = UIWindowLevelAlert + 1001;
-    self.panelWindow.backgroundColor = [UIColor clearColor];
-    self.panelWindow.userInteractionEnabled = YES;
-    self.panel = [[SettingsPanel alloc] initWithFrame:self.panelWindow.bounds];
-    [self.panelWindow addSubview:self.panel];
-    self.panelWindow.hidden = YES;  // fully invisible → zero touch interception
+        CGFloat panelW = 260, panelH = 264;
+        CGRect panelFrame = CGRectMake((screen.size.width - panelW) / 2.0,
+                                       (screen.size.height - panelH) / 2.0,
+                                       panelW, panelH);
+        self.panelWindow = [[UIWindow alloc] initWithFrame:panelFrame];
+        if (scene) self.panelWindow.windowScene = scene;
+        self.panelWindow.windowLevel = UIWindowLevelAlert + 1001;
+        self.panelWindow.backgroundColor = [UIColor clearColor];
+        self.panelWindow.userInteractionEnabled = YES;
+        self.panel = [[SettingsPanel alloc] initWithFrame:self.panelWindow.bounds];
+        [self.panelWindow addSubview:self.panel];
+        self.panelWindow.hidden = YES;
 
-    self.panelVisible = false;
+        self.panelVisible = false;
 
-    // close button inside panel notifies us
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(hidePanel)
-                                                 name:@"MLBBESP_ClosePanel"
-                                               object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(hidePanel)
+                                                     name:@"MLBBESP_ClosePanel"
+                                                   object:nil];
 
-    NSLog(@"[MLBBESP] Control windows ready");
+        NSLog(@"[MLBBESP] Control windows ready");
+    }
+    @catch (NSException* ex) {
+        NSLog(@"[MLBBESP] setup exception: %@", ex);
+        self.btnWindow = nil;
+        self.panelWindow = nil;
+    }
 }
 
 - (void)togglePanel {
@@ -666,7 +703,7 @@ static void* reader_thread(void* arg) {
 @end
 
 // ===========================================================================
-// ESP OVERLAY WINDOW (full-screen but NON-INTERACTIVE — passes all touches)
+// ESP OVERLAY WINDOW (full-screen but NON-INTERACTIVE)
 // ===========================================================================
 
 static UIWindow* g_overlay_window = nil;
@@ -675,21 +712,27 @@ static ESPOverlayView* g_overlay_view = nil;
 static void create_overlay(UIWindow* key) {
     if (g_overlay_window) return;
 
-    CGRect b = UIScreen.mainScreen.bounds;
-    g_screen_w = b.size.width;
-    g_screen_h = b.size.height;
+    @try {
+        CGRect b = UIScreen.mainScreen.bounds;
+        g_screen_w = b.size.width;
+        g_screen_h = b.size.height;
 
-    g_overlay_window = [[UIWindow alloc] initWithFrame:b];
-    if (@available(iOS 13.0, *)) g_overlay_window.windowScene = key.windowScene;
-    g_overlay_window.windowLevel = UIWindowLevelAlert + 999;
-    g_overlay_window.backgroundColor = [UIColor clearColor];
-    g_overlay_window.userInteractionEnabled = NO;  // critical: passes ALL touches through
+        g_overlay_window = [[UIWindow alloc] initWithFrame:b];
+        if (@available(iOS 13.0, *)) g_overlay_window.windowScene = key.windowScene;
+        g_overlay_window.windowLevel = UIWindowLevelAlert + 999;
+        g_overlay_window.backgroundColor = [UIColor clearColor];
+        g_overlay_window.userInteractionEnabled = NO;
 
-    g_overlay_view = [[ESPOverlayView alloc] initWithFrame:b];
-    g_overlay_view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    [g_overlay_window addSubview:g_overlay_view];
-    g_overlay_window.hidden = NO;
-    NSLog(@"[MLBBESP] Overlay ready (%.0f x %.0f)", g_screen_w, g_screen_h);
+        g_overlay_view = [[ESPOverlayView alloc] initWithFrame:b];
+        g_overlay_view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [g_overlay_window addSubview:g_overlay_view];
+        g_overlay_window.hidden = NO;
+        NSLog(@"[MLBBESP] Overlay ready (%.0f x %.0f)", g_screen_w, g_screen_h);
+    }
+    @catch (NSException* ex) {
+        NSLog(@"[MLBBESP] overlay exception: %@", ex);
+        g_overlay_window = nil;
+    }
 }
 
 static void poll_windows(void);
@@ -697,14 +740,15 @@ static void poll_windows(void);
 static void poll_windows(void) {
     static int polls = 0;
     if (g_overlay_window) return;
-    if (polls > 120) return;
+    if (polls > 180) return;
     polls++;
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
+        // require Unity's window to be fully set up — rootViewController exists
         UIWindow* key = nil;
         for (UIWindow* w in [UIApplication sharedApplication].windows) {
-            if (w.isKeyWindow) { key = w; break; }
+            if (w.isKeyWindow && w.rootViewController != nil) { key = w; break; }
         }
         if (!key) {
             poll_windows();
@@ -726,5 +770,7 @@ static void MLBBESP_init(void) {
     pthread_t t;
     pthread_create(&t, NULL, reader_thread, NULL);
     pthread_detach(t);
-    dispatch_async(dispatch_get_main_queue(), ^{ poll_windows(); });
+    // UI setup delayed well past Unity startup
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ poll_windows(); });
 }
