@@ -6,8 +6,10 @@
 #import <CoreGraphics/CoreGraphics.h>
 #import <Foundation/Foundation.h>
 #import <mach/mach.h>
+#import <mach/mach_vm.h>
 #import <dlfcn.h>
 #import <pthread.h>
+#import <unistd.h>
 #import <string.h>
 #import <math.h>
 
@@ -92,7 +94,7 @@ static bool init_il2cpp(void) {
 
 // ---- crash-proof memory reads (probe via mach, never segfault) ----
 static bool safe_read(uintptr_t addr, void* buf, size_t len) {
-    if (!addr || len == 0) return false;
+    if (addr == 0 || len == 0) return false;
     mach_vm_size_t out = 0;
     kern_return_t kr = mach_vm_read_overwrite(mach_task_self(),
                                               (mach_vm_address_t)addr,
@@ -138,7 +140,7 @@ static vec3 read_vec3(uintptr_t a) {
 
 static void read_string(uintptr_t str_ptr, char* out, int max_len) {
     out[0] = '\0';
-    if (!str_ptr) return;
+    if (str_ptr == 0) return;
     int32_t len = 0;
     if (!safe_read(str_ptr + O_STRING_LENGTH, &len, 4)) return;
     if (len <= 0 || len > 256) return;
@@ -164,19 +166,18 @@ static void read_string(uintptr_t str_ptr, char* out, int max_len) {
 static Il2CppClass* find_class_in_assembly_csharp(const char* target, const char* required_field) {
     if (!g_il2cpp_ready) return NULL;
     Il2CppDomain* domain = p_domain_get();
-    if (!domain) return NULL;
+    if (domain == NULL) return NULL;
 
     size_t asm_count = 0;
     const Il2CppAssembly** assemblies = p_domain_get_assemblies(domain, &asm_count);
-    if (!assemblies) return NULL;
+    if (assemblies == NULL) return NULL;
 
     for (size_t a = 0; a < asm_count; a++) {
         Il2CppImage* image = p_assembly_get_image(assemblies[a]);
-        if (!image) continue;
+        if (image == NULL) continue;
 
         const char* img_name = p_image_get_name(image);
-        if (!img_name) continue;
-        // target image only — avoids touching 73 other assemblies' metadata
+        if (img_name == NULL) continue;
         if (strcmp(img_name, "Assembly-CSharp.dll") != 0) continue;
 
         size_t cc = p_image_get_class_count(image);
@@ -184,10 +185,10 @@ static Il2CppClass* find_class_in_assembly_csharp(const char* target, const char
 
         for (size_t c = 0; c < cc; c++) {
             Il2CppClass* klass = p_image_get_class(image, c);
-            if (!klass) continue;
+            if (klass == NULL) continue;
             const char* name = p_class_get_name(klass);
-            if (name && strcmp(name, target) == 0) {
-                if (p_class_get_field_from_name(klass, required_field)) return klass;
+            if (name != NULL && strcmp(name, target) == 0) {
+                if (p_class_get_field_from_name(klass, required_field) != NULL) return klass;
             }
         }
     }
@@ -195,24 +196,24 @@ static Il2CppClass* find_class_in_assembly_csharp(const char* target, const char
 }
 
 static bool resolve_classes(void) {
-    if (!g_bm_class) g_bm_class = find_class_in_assembly_csharp("BattleManager", "m_ShowPlayers");
-    if (!g_gm_class) g_gm_class = find_class_in_assembly_csharp("GameMethod", "mainCamera");
+    if (g_bm_class == NULL) g_bm_class = find_class_in_assembly_csharp("BattleManager", "m_ShowPlayers");
+    if (g_gm_class == NULL) g_gm_class = find_class_in_assembly_csharp("GameMethod", "mainCamera");
     return (g_bm_class != NULL);
 }
 
 static uintptr_t get_bm_instance(void) {
-    if (!g_bm_class) return 0;
+    if (g_bm_class == NULL) return 0;
     Il2CppFieldInfo* f = p_class_get_field_from_name(g_bm_class, "Instance");
-    if (!f) return 0;
+    if (f == NULL) return 0;
     void* v = NULL;
     p_field_static_get_value(f, &v);
     return (uintptr_t)v;
 }
 
 static uintptr_t get_gm_mainCamera(void) {
-    if (!g_gm_class) return 0;
+    if (g_gm_class == NULL) return 0;
     Il2CppFieldInfo* f = p_class_get_field_from_name(g_gm_class, "mainCamera");
-    if (!f) return 0;
+    if (f == NULL) return 0;
     void* v = NULL;
     p_field_static_get_value(f, &v);
     return (uintptr_t)v;
@@ -220,7 +221,7 @@ static uintptr_t get_gm_mainCamera(void) {
 
 // ---- projection ----
 static bool project_to_screen(vec3 world, float* sx, float* sy) {
-    if (!g_cam_pos.x && !g_cam_pos.y && !g_cam_pos.z) return false;
+    if (g_cam_pos.x == 0 && g_cam_pos.y == 0 && g_cam_pos.z == 0) return false;
     float pitch = CAM_PITCH_DEG * (float)M_PI / 180.0f;
     vec3 forward = { 0.0f, -sinf(pitch), cosf(pitch) };
     vec3 right   = { 1.0f, 0.0f, 0.0f };
@@ -246,23 +247,23 @@ static void read_all_entities(void) {
     g_entity_count = 0;
     pthread_mutex_unlock(&g_lock);
 
-    if (!g_il2cpp_ready || !g_bm_class) return;
+    if (!g_il2cpp_ready || g_bm_class == NULL) return;
     if (!g_esp_enabled) return;
 
     uintptr_t bm = get_bm_instance();
-    if (!bm) return;
+    if (bm == 0) return;
 
     uintptr_t sf = get_gm_mainCamera();
-    if (sf) g_cam_pos = read_vec3(sf + SF_m_CameraCurrentPos);
+    if (sf != 0) g_cam_pos = read_vec3(sf + SF_m_CameraCurrentPos);
 
     uintptr_t list = read_ptr(bm + BM_m_ShowPlayers);
-    if (!list) return;
+    if (list == 0) return;
     uintptr_t arr = read_ptr(list + O_LIST_ITEMS);
-    if (!arr) return;
+    if (arr == 0) return;
 
     int32_t count = read_i32(arr + O_ARRAY_LENGTH);
     int32_t list_size = read_i32(list + O_LIST_SIZE);
-    if (list_size >= 0 && list_size < count) count = list_size; // sanity
+    if (list_size >= 0 && list_size < count) count = list_size;
     if (count <= 0) return;
     if (count > MAX_ENTITIES) count = MAX_ENTITIES;
 
@@ -273,9 +274,8 @@ static void read_all_entities(void) {
     int n = 0;
     for (int i = 0; i < count && n < MAX_ENTITIES; i++) {
         uintptr_t ep = ents[i];
-        if (!ep) continue;
+        if (ep == 0) continue;
 
-        // probe object header first — rejects wild pointers safely
         uint8_t probe = 0;
         if (!safe_read(ep, &probe, 1)) continue;
 
@@ -297,7 +297,7 @@ static void read_all_entities(void) {
         }
 
         vec3 world = read_vec3(ep + SE_m_vUnityCachePos);
-        if (!world.x && !world.y && !world.z) continue;
+        if (world.x == 0 && world.y == 0 && world.z == 0) continue;
 
         float fx, fy, hx, hy;
         vec3 feet = world;
@@ -326,11 +326,11 @@ static void read_all_entities(void) {
 static void* reader_thread(void* arg) {
     (void)arg;
 
-    // wait for the IL2CPP VM to actually be running — never touch il2cpp before init
+    // wait until IL2CPP VM is actually running — never touch il2cpp before init
     int waits = 0;
-    while (waits < 600 && g_esp_enabled == g_esp_enabled) { // loop cap ~10 min
+    while (waits < 600) {
         if (g_il2cpp_ready) break;
-        if (init_il2cpp() && p_vm_running && p_vm_running()) {
+        if (init_il2cpp() && p_vm_running()) {
             g_il2cpp_ready = true;
             break;
         }
@@ -341,8 +341,8 @@ static void* reader_thread(void* arg) {
     NSLog(@"[MLBBESP] IL2CPP VM running, API ready");
 
     Il2CppDomain* domain = p_domain_get();
-    if (!domain) return NULL;
-    if (!p_thread_attach(domain)) {
+    if (domain == NULL) return NULL;
+    if (p_thread_attach(domain) == NULL) {
         NSLog(@"[MLBBESP] thread attach failed");
         return NULL;
     }
@@ -352,7 +352,7 @@ static void* reader_thread(void* arg) {
         attempts++;
         usleep(2000000);
     }
-    if (!g_bm_class) { NSLog(@"[MLBBESP] BattleManager not found"); return NULL; }
+    if (g_bm_class == NULL) { NSLog(@"[MLBBESP] BattleManager not found"); return NULL; }
     NSLog(@"[MLBBESP] Classes resolved");
 
     while (true) {
@@ -385,11 +385,15 @@ static void* reader_thread(void* arg) {
     return self;
 }
 
-- (void)tick:(CADisplayLink*)l { [self setNeedsDisplay]; }
+- (void)tick:(CADisplayLink*)l {
+    (void)l;
+    [self setNeedsDisplay];
+}
 
 - (void)drawRect:(CGRect)rect {
+    (void)rect;
     CGContextRef ctx = UIGraphicsGetCurrentContext();
-    if (!ctx) return;
+    if (ctx == NULL) return;
     if (!g_esp_enabled) return;
 
     ESPEntityData ents[MAX_ENTITIES];
@@ -633,7 +637,7 @@ static void* reader_thread(void* arg) {
 }
 
 - (void)setupWithKeyWindow:(UIWindow*)keyWindow {
-    if (self.btnWindow) return;
+    if (self.btnWindow != nil) return;
 
     @try {
         CGRect screen = UIScreen.mainScreen.bounds;
@@ -644,7 +648,7 @@ static void* reader_thread(void* arg) {
         CGRect btnFrame = CGRectMake(screen.size.width - btnSize - 12,
                                      screen.size.height * 0.25, btnSize, btnSize);
         self.btnWindow = [[UIWindow alloc] initWithFrame:btnFrame];
-        if (scene) self.btnWindow.windowScene = scene;
+        if (scene != nil) self.btnWindow.windowScene = scene;
         self.btnWindow.windowLevel = UIWindowLevelAlert + 1000;
         self.btnWindow.backgroundColor = [UIColor clearColor];
         self.btnWindow.userInteractionEnabled = YES;
@@ -657,7 +661,7 @@ static void* reader_thread(void* arg) {
                                        (screen.size.height - panelH) / 2.0,
                                        panelW, panelH);
         self.panelWindow = [[UIWindow alloc] initWithFrame:panelFrame];
-        if (scene) self.panelWindow.windowScene = scene;
+        if (scene != nil) self.panelWindow.windowScene = scene;
         self.panelWindow.windowLevel = UIWindowLevelAlert + 1001;
         self.panelWindow.backgroundColor = [UIColor clearColor];
         self.panelWindow.userInteractionEnabled = YES;
@@ -687,7 +691,7 @@ static void* reader_thread(void* arg) {
 }
 
 - (void)showPanel {
-    if (!self.panelWindow) return;
+    if (self.panelWindow == nil) return;
     self.panel.alpha = 1;
     self.panel.transform = CGAffineTransformIdentity;
     self.panelWindow.hidden = NO;
@@ -695,7 +699,7 @@ static void* reader_thread(void* arg) {
 }
 
 - (void)hidePanel {
-    if (!self.panelWindow) return;
+    if (self.panelWindow == nil) return;
     self.panelWindow.hidden = YES;
     self.panelVisible = false;
 }
@@ -710,7 +714,7 @@ static UIWindow* g_overlay_window = nil;
 static ESPOverlayView* g_overlay_view = nil;
 
 static void create_overlay(UIWindow* key) {
-    if (g_overlay_window) return;
+    if (g_overlay_window != nil) return;
 
     @try {
         CGRect b = UIScreen.mainScreen.bounds;
@@ -739,18 +743,17 @@ static void poll_windows(void);
 
 static void poll_windows(void) {
     static int polls = 0;
-    if (g_overlay_window) return;
+    if (g_overlay_window != nil) return;
     if (polls > 180) return;
     polls++;
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        // require Unity's window to be fully set up — rootViewController exists
         UIWindow* key = nil;
         for (UIWindow* w in [UIApplication sharedApplication].windows) {
             if (w.isKeyWindow && w.rootViewController != nil) { key = w; break; }
         }
-        if (!key) {
+        if (key == nil) {
             poll_windows();
             return;
         }
@@ -770,7 +773,6 @@ static void MLBBESP_init(void) {
     pthread_t t;
     pthread_create(&t, NULL, reader_thread, NULL);
     pthread_detach(t);
-    // UI setup delayed well past Unity startup
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ poll_windows(); });
 }
