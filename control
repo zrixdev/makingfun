@@ -1,0 +1,8 @@
+Package: com.op.mlbbesp
+Name: MLBB ESP
+Version: 1.0.0
+Architecture: iphoneos-arm
+Description: ESP overlay for Mobile Legends
+Author: Operator
+Section: Tweaks
+Depends: mobilesubstrate
